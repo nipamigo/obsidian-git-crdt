@@ -1,6 +1,6 @@
 {
   "name": "obsidian-git-crdt",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Obsidian plugin: CRDT editor + Git sync — conflict-free collaboration via Yjs and isomorphic-git.",
   "main": "main.js",
   "scripts": {

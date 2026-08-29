@@ -1,5 +1,6 @@
 import { CrdtRegistry } from "./crdt";
 import { GitService } from "./git";
+import { ShadowGitService } from "./shadow-git";
 import { mergeThreeWay, assertContentPreservation } from "./merge";
 import { mergeBlocksThreeWayV2 } from "./block-merge";
 import { HistoryManager } from "./history";
@@ -19,11 +20,14 @@ export interface SyncResult {
 /**
  * SyncEngine — 协调 CRDT + Git 的同步引擎
  *
+ * v0.6 变更:使用 ShadowGitService 替代直接操作 GitService
+ *
  * 核心工作流(参考 OpenKnowledge):
- * 1. Fetch 远端 → 找出有变更的 Markdown 文件
- * 2. 对每个变更文件:读取基线(baseline) + 本地 + 远端 → 三路文本合并 → 写回
- * 3. 提交合并结果
- * 4. 推送到远端
+ * 1. syncVaultToShadow(): vault 的 .md 文件 → 复制到 shadow 工作区
+ * 2. Fetch 远端(shadow repo)→ 找出有变更的 Markdown 文件
+ * 3. 对每个变更文件:读取基线(shadow HEAD) + 本地(vault) + 远端(shadow remote ref) → 三路文本合并 → 写回 vault + shadow
+ * 4. 提交合并结果(shadow repo)
+ * 5. 推送到远端(shadow repo)
  *
  * 为什么 Git pull 不用 CRDT 合并(和 OK 一致):
  * Git pull 是"两个完整版本的合并",两边没有共享的 CRDT 操作历史,
@@ -38,14 +42,14 @@ export interface SyncResult {
 export class SyncEngine {
   private app: App;
   private crdtRegistry: CrdtRegistry;
-  private git: GitService;
+  private shadowGit: ShadowGitService;
   private history?: HistoryManager;
   private syncing = false;
 
-  constructor(app: App, crdtRegistry: CrdtRegistry, git: GitService, history?: HistoryManager) {
+  constructor(app: App, crdtRegistry: CrdtRegistry, shadowGit: ShadowGitService, history?: HistoryManager) {
     this.app = app;
     this.crdtRegistry = crdtRegistry;
-    this.git = git;
+    this.shadowGit = shadowGit;
     this.history = history;
   }
 
@@ -79,8 +83,8 @@ export class SyncEngine {
       // 记录同步前的历史数量,用于统计本次新增
       if (this.history) (this as any)._preSyncHistoryCount = this.history.count();
 
-      // 第 1 步:fetch 远端,获取变更文件列表
-      const pullResult = await this.git.smartPull();
+      // 第 1 步:smartPull — 内部先 syncVaultToShadow,再 fetch + 对比变更文件
+      const pullResult = await this.shadowGit.smartPull();
       if (!pullResult.success) {
         result.error = pullResult.error;
         return result;
@@ -99,27 +103,27 @@ export class SyncEngine {
         }
       }
 
-      // 第 3 步:提交合并结果
+      // 第 3 步:提交合并结果(在 shadow repo 中)
       if (result.mergedFiles > 0) {
-        const oid = await this.git.commitAll(
+        const oid = await this.shadowGit.commitAll(
           `git-crdt: merge ${result.mergedFiles} file(s) via three-way merge`
         );
         result.committed = !!oid;
       } else {
         // 没有要合并的文件,但本地可能有未提交变更,也一并提交
-        const status = await this.git.statusMatrix();
+        const status = await this.shadowGit.statusMatrix();
         const hasChanges = status.some(
           (r: any) => r[2] !== r[3] || r[2] !== r[1]
         );
         if (hasChanges) {
-          const oid = await this.git.commitAll(`git-crdt: sync snapshot`);
+          const oid = await this.shadowGit.commitAll(`git-crdt: sync snapshot`);
           result.committed = !!oid;
         }
       }
 
-      // 第 4 步:push
+      // 第 4 步:push(从 shadow repo)
       if (result.committed) {
-        const pushResult = await this.git.push();
+        const pushResult = await this.shadowGit.push();
         result.pushed = pushResult.success;
         if (!pushResult.success) {
           result.error = pushResult.error;
@@ -152,9 +156,10 @@ export class SyncEngine {
     const vault = this.app.vault;
     const abstractFile = vault.getFileByPath(filepath);
 
-    // 远端新增文件 — 直接写入
+    // 远端新增文件 — 直接写入 vault + shadow
     if (!abstractFile && remoteContent !== null) {
       await vault.create(filepath, remoteContent);
+      this.shadowGit.writeMergedFile(filepath, remoteContent);
       // 同时加载到 CRDT
       const crdt = this.crdtRegistry.get(filepath);
       crdt.loadFromMarkdown(remoteContent);
@@ -170,17 +175,16 @@ export class SyncEngine {
     if (!(abstractFile instanceof TFile)) return;
     const file = abstractFile;
 
-    // 读取本地当前内容
+    // 读取本地当前内容(vault 工作区)
     const localContent = await vault.read(file);
 
-    // 读取基线(baseline):本地 HEAD 版本
-    // 注意:严格来说 baseline 应该是 merge-base,但 MVP 用本地 HEAD 简化
-    const baselineContent = await this.git.readFileFromHead(filepath);
+    // 读取基线(baseline):shadow repo 的 HEAD 版本
+    const baselineContent = await this.shadowGit.readFileFromHead(filepath);
 
     let merged: string;
 
     if (baselineContent === null) {
-      // 本地还没有 HEAD(新文件)→ 远端版本为准
+      // shadow repo 还没有 HEAD(首次同步)→ 远端版本为准
       merged = remoteContent;
     } else {
       // v0.4:先用块级合并(段落/标题/列表为单位),块内冲突再降级到文本级合并
@@ -204,10 +208,13 @@ export class SyncEngine {
     // 通过 CRDT 层应用合并结果(行级增量,保留未变行的 Item 身份)
     crdt.loadFromMarkdown(merged);
 
-    // 写回文件
+    // 写回 vault 文件
     const finalContent = crdt.getMarkdown();
     if (finalContent !== localContent) {
       await vault.modify(file, finalContent);
+
+      // v0.6: 同时写入 shadow repo 工作区
+      this.shadowGit.writeMergedFile(filepath, finalContent);
 
       // v0.5: 记录合并历史(只有内容实际变化时才记录)
       if (this.history) {
@@ -217,7 +224,7 @@ export class SyncEngine {
             before: localContent,
             after: finalContent,
             remoteContent,
-            source: `git pull from origin/${this.git.getBranch()}`,
+            source: `git pull from origin/${this.shadowGit.getBranch()}`,
             warnings: warnings.filter((w) => w.includes(filepath)),
           });
           // 计数器(SyncResult 上)
@@ -226,6 +233,9 @@ export class SyncEngine {
           console.warn(`[git-crdt] failed to record history for ${filepath}:`, e);
         }
       }
+    } else {
+      // 内容没变化,也要同步到 shadow(确保 shadow 和 vault 一致)
+      this.shadowGit.writeMergedFile(filepath, finalContent);
     }
   }
 
@@ -247,7 +257,7 @@ export class SyncEngine {
     this.syncing = true;
     const preCount = this.history?.count() || 0;
     try {
-      const pullResult = await this.git.smartPull();
+      const pullResult = await this.shadowGit.smartPull();
       if (!pullResult.success) {
         return {
           success: false,
@@ -286,6 +296,21 @@ export class SyncEngine {
     } finally {
       this.syncing = false;
     }
+  }
+
+  /** 手动提交并推送(从 shadow repo) */
+  async commitAndPush(message: string): Promise<{ committed: boolean; pushed: boolean; error?: string }> {
+    const oid = await this.shadowGit.commitAll(message);
+    if (!oid) {
+      return { committed: false, pushed: false };
+    }
+
+    const pushResult = await this.shadowGit.push();
+    return {
+      committed: true,
+      pushed: pushResult.success,
+      error: pushResult.error,
+    };
   }
 
   isSyncing(): boolean {

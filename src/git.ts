@@ -66,6 +66,26 @@ export class GitService {
     return git.statusMatrix({ fs: this.fs, dir: this.dir });
   }
 
+  /** 暂存文件(stage) — 供 ShadowGitService.commitAll 使用 */
+  async addFile(filepath: string): Promise<void> {
+    await git.add({ fs: this.fs, dir: this.dir, filepath });
+  }
+
+  /** 从暂存区移除文件(git rm) — 供 ShadowGitService.commitAll 使用 */
+  async removeFile(filepath: string): Promise<void> {
+    await git.remove({ fs: this.fs, dir: this.dir, filepath });
+  }
+
+  /** 执行 commit(不包含 stage 逻辑,文件已提前 add) — 供 ShadowGitService 使用 */
+  async commit(message: string): Promise<string> {
+    return git.commit({
+      fs: this.fs,
+      dir: this.dir,
+      author: this.author,
+      message,
+    });
+  }
+
   /** 读取指定文件在 HEAD 中的内容(公开) */
   async readFileFromHead(filepath: string): Promise<string | null> {
     return this.readBlobAt("HEAD", filepath);

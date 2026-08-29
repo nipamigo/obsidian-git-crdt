@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { CrdtRegistry } from "./crdt";
 import { GitService } from "./git";
+import { ShadowGitService } from "./shadow-git";
 import { SyncEngine, SyncResult } from "./sync";
 import { yEditorBindingExtension, bindYTextToView } from "./editor-binding";
 import { HistoryManager } from "./history";
@@ -18,6 +19,7 @@ interface GitCrdtSettings {
   autoSyncInterval: number;
   sidecarDir: string;
   historyMaxRecords: number;
+  useShadowRepo: boolean;
 }
 
 const DEFAULT_SETTINGS: GitCrdtSettings = {
@@ -29,12 +31,13 @@ const DEFAULT_SETTINGS: GitCrdtSettings = {
   autoSyncInterval: 0,
   sidecarDir: ".obsidian/plugins/git-crdt/sidecar",
   historyMaxRecords: 50,
+  useShadowRepo: true,
 };
 
 export default class GitCrdtPlugin extends Plugin {
   settings: GitCrdtSettings = DEFAULT_SETTINGS;
   crdtRegistry!: CrdtRegistry;
-  gitService!: GitService;
+  shadowGit!: ShadowGitService;
   syncEngine!: SyncEngine;
   historyManager!: HistoryManager;
 
@@ -70,9 +73,11 @@ export default class GitCrdtPlugin extends Plugin {
 
     this.historyManager = new HistoryManager(historyPath, this.settings.historyMaxRecords);
 
-    this.gitService = new GitService({
+    // v0.6: 使用 ShadowGitService(隔离用户 staging area)
+    this.shadowGit = new ShadowGitService({
       fs,
-      dir: this.vaultRoot,
+      vaultDir: this.vaultRoot,
+      sidecarDir: sidecarPath,
       authorName: this.settings.authorName,
       authorEmail: this.settings.authorEmail,
       remote: this.settings.remoteUrl,
@@ -80,7 +85,7 @@ export default class GitCrdtPlugin extends Plugin {
       token: this.settings.gitToken,
     });
 
-    this.syncEngine = new SyncEngine(this.app, this.crdtRegistry, this.gitService, this.historyManager);
+    this.syncEngine = new SyncEngine(this.app, this.crdtRegistry, this.shadowGit, this.historyManager);
 
     // 状态栏
     this.statusBarItem = this.addStatusBarItem();
@@ -90,10 +95,8 @@ export default class GitCrdtPlugin extends Plugin {
     this.statusBarItem.onClickEvent(() => this.doSync());
 
     // ===== v0.3: 编辑器 CRDT 实时绑定 =====
-    // 1. 注册 CodeMirror 扩展(所有编辑器视图都会加载)
     this.registerEditorExtension(yEditorBindingExtension);
 
-    // 2. 监听文件打开:加载 CRDT 状态并绑定到编辑器
     this.registerEvent(
       this.app.workspace.on("file-open", (file) => {
         if (file && file.extension === "md") {
@@ -102,16 +105,14 @@ export default class GitCrdtPlugin extends Plugin {
       })
     );
 
-    // 3. 如果已经有打开的文件,立即绑定
     const activeFile = this.app.workspace.getActiveFile();
     if (activeFile && activeFile.extension === "md") {
-      // 延迟一下,等编辑器初始化完成
       this.app.workspace.onLayoutReady(() => {
         this.bindEditorForFile(activeFile);
       });
     }
 
-    // 命令
+    // ===== 命令 =====
     this.addCommand({
       id: "git-crdt-sync",
       name: "Sync (pull → merge → commit → push)",
@@ -132,8 +133,14 @@ export default class GitCrdtPlugin extends Plugin {
 
     this.addCommand({
       id: "git-crdt-init",
-      name: "Initialize Git repo",
+      name: "Initialize Git repo (shadow repo)",
       callback: () => this.doInit(),
+    });
+
+    this.addCommand({
+      id: "git-crdt-sync-to-shadow",
+      name: "Sync vault files to shadow repo",
+      callback: () => this.doSyncToShadow(),
     });
 
     // ===== v0.5: 合并历史命令 =====
@@ -161,13 +168,13 @@ export default class GitCrdtPlugin extends Plugin {
 
     // 如果配置了远端,自动设置
     if (this.settings.remoteUrl) {
-      this.gitService.setRemote(this.settings.remoteUrl).catch(console.error);
+      this.shadowGit.setRemote(this.settings.remoteUrl).catch(console.error);
     }
 
     // 自动同步
     this.setupAutoSync();
 
-    console.log("[git-crdt] plugin loaded (v0.5 with merge history + revert)");
+    console.log("[git-crdt] plugin loaded (v0.6 with shadow repo isolation)");
   }
 
   onunload() {
@@ -175,7 +182,6 @@ export default class GitCrdtPlugin extends Plugin {
       clearInterval(this.autoSyncTimer);
       this.autoSyncTimer = null;
     }
-    // 保存所有打开文件的 sidecar
     this.saveAllSidecars().catch(console.error);
     this.crdtRegistry.destroyAll();
     console.log("[git-crdt] plugin unloaded");
@@ -191,27 +197,17 @@ export default class GitCrdtPlugin extends Plugin {
 
   // ===== 编辑器绑定 =====
 
-  /**
-   * 为指定文件绑定 CRDT 编辑器
-   * 1. 获取或创建 CrdtManager
-   * 2. 尝试从 sidecar 加载(保留操作历史)
-   * 3. 加载当前文件内容(用 applyFastDiff 增量更新)
-   * 4. 绑定到当前活动编辑器视图
-   */
   private async bindEditorForFile(file: TFile) {
     const relPath = file.path;
     const absPath = path.join(this.vaultRoot, relPath);
 
     try {
-      // 获取 CrdtManager
       const mgr = this.crdtRegistry.get(relPath);
 
-      // 先尝试从 sidecar 加载(保留 CRDT 历史)
       const loadedFromSidecar = await mgr.loadFromSidecar({
         readFile: async (p: string) => fs.readFileSync(p),
       });
 
-      // 再用当前文件内容同步(可能有外部改动)
       const fileContent = await this.app.vault.read(file);
       mgr.loadFromMarkdown(fileContent);
 
@@ -221,14 +217,12 @@ export default class GitCrdtPlugin extends Plugin {
         console.log(`[git-crdt] CRDT initialized from file: ${relPath}`);
       }
 
-      // 绑定到活动编辑器视图
       this.bindToActiveEditor(relPath);
     } catch (e) {
       console.error(`[git-crdt] failed to bind editor for ${relPath}:`, e);
     }
   }
 
-  /** 找到活动编辑器的 CodeMirror view 并绑定 Y.Text */
   private bindToActiveEditor(filePath: string): void {
     const activeEditor = this.app.workspace.activeEditor;
     if (!activeEditor || !activeEditor.editor) return;
@@ -241,25 +235,17 @@ export default class GitCrdtPlugin extends Plugin {
     console.log(`[git-crdt] editor bound: ${filePath}`);
   }
 
-  /**
-   * 从 Obsidian Editor 获取底层 CodeMirror EditorView
-   * Obsidian 的 Editor 有一个未公开的 cm 属性
-   */
   private getEditorView(editor: Editor): EditorView | null {
     // @ts-ignore — Obsidian Editor 的 cm 属性指向 CodeMirror 实例
     const cm = editor.cm;
     if (!cm) return null;
-    // 可能是 EditorView 实例(CM6)
     if (typeof cm.dispatch === "function" && cm.state) {
       return cm as EditorView;
     }
     return null;
   }
 
-  /** 保存所有已打开文件的 sidecar */
   private async saveAllSidecars(): Promise<void> {
-    // 遍历所有注册的 CrdtManager
-    // 注意:CrdtRegistry 没有遍历方法,我们通过活动文件来保存
     const activeFile = this.app.workspace.getActiveFile();
     if (activeFile && activeFile.extension === "md") {
       const mgr = this.crdtRegistry.get(activeFile.path);
@@ -274,7 +260,7 @@ export default class GitCrdtPlugin extends Plugin {
     }
   }
 
-  // --- 公开方法,设置面板调用 ---
+  // ===== 命令实现 =====
 
   async doSync() {
     if (this.syncEngine.isSyncing()) {
@@ -285,8 +271,6 @@ export default class GitCrdtPlugin extends Plugin {
     this.setStatus("syncing...");
     const result = await this.syncEngine.sync();
     this.handleResult(result, "Sync");
-
-    // 同步后刷新编辑器绑定(如果活动文件被修改了)
     this.refreshActiveEditor();
   }
 
@@ -299,48 +283,55 @@ export default class GitCrdtPlugin extends Plugin {
     this.setStatus("pulling...");
     const result = await this.syncEngine.pullOnly();
     this.handleResult(result, "Pull");
-
-    // 同步后刷新编辑器绑定
     this.refreshActiveEditor();
   }
 
-  /** 同步后刷新活动编辑器的 CRDT 绑定 */
+  /** v0.6: 手动同步 vault → shadow */
+  async doSyncToShadow() {
+    this.setStatus("syncing to shadow...");
+    try {
+      const result = await this.shadowGit.syncVaultToShadow();
+      this.setStatus("ready");
+      new Notice(`Git CRDT: ${result.copied} files synced, ${result.deleted} deleted (shadow repo)`);
+    } catch (e: any) {
+      this.setStatus("error");
+      new Notice(`Git CRDT: sync to shadow failed — ${e?.message || e}`);
+    }
+  }
+
   private refreshActiveEditor(): void {
     const activeFile = this.app.workspace.getActiveFile();
     if (activeFile && activeFile.extension === "md") {
-      // 重新绑定:Y.Text 已经被 sync engine 更新了
-      // 编辑器绑定会自动检测到 Y.Text 变化并更新编辑器
       this.bindToActiveEditor(activeFile.path);
     }
   }
 
   async doPush() {
     this.setStatus("committing...");
-    const oid = await this.gitService.commitAll("git-crdt: manual commit");
-    if (!oid) {
+    const result = await this.syncEngine.commitAndPush("git-crdt: manual commit");
+    if (!result.committed) {
       this.setStatus("nothing to commit");
       new Notice("Git CRDT: nothing to commit");
       return;
     }
 
     this.setStatus("pushing...");
-    const pushResult = await this.gitService.push();
-    if (pushResult.success) {
+    if (result.pushed) {
       this.setStatus("pushed");
       new Notice("Git CRDT: pushed successfully");
     } else {
       this.setStatus("push failed");
-      new Notice(`Git CRDT: push failed — ${pushResult.error}`);
+      new Notice(`Git CRDT: push failed — ${result.error}`);
     }
   }
 
   async doInit() {
     try {
-      await this.gitService.initIfNeeded();
+      await this.shadowGit.initIfNeeded();
       if (this.settings.remoteUrl) {
-        await this.gitService.setRemote(this.settings.remoteUrl);
+        await this.shadowGit.setRemote(this.settings.remoteUrl);
       }
-      new Notice("Git CRDT: repository initialized");
+      new Notice("Git CRDT: shadow repo initialized");
       this.setStatus("ready");
     } catch (e: any) {
       new Notice(`Git CRDT: init failed — ${e?.message || e}`);
@@ -348,12 +339,11 @@ export default class GitCrdtPlugin extends Plugin {
   }
 
   updateToken(token: string) {
-    this.gitService.setToken(token);
+    this.shadowGit.setToken(token);
   }
 
   // ===== v0.5: 合并历史 =====
 
-  /** 打开合并历史 UI */
   showHistory(filterFile: string | null) {
     new HistoryListModal(
       this.app,
@@ -366,21 +356,20 @@ export default class GitCrdtPlugin extends Plugin {
     ).open();
   }
 
-  /** 回退文件到合并前状态 */
   private async revertFile(filepath: string, beforeContent: string): Promise<void> {
     const file = this.app.vault.getFileByPath(filepath);
     if (!file || !(file instanceof TFile)) {
       throw new Error(`File not found: ${filepath}`);
     }
 
-    // 写回合并前内容
     await this.app.vault.modify(file, beforeContent);
 
-    // 重新加载 CRDT
+    // v0.6: 同时更新 shadow repo
+    this.shadowGit.writeMergedFile(filepath, beforeContent);
+
     const mgr = this.crdtRegistry.get(filepath);
     mgr.loadFromMarkdown(beforeContent);
 
-    // 刷新编辑器
     this.refreshActiveEditor();
 
     console.log(`[git-crdt] reverted ${filepath} to pre-merge state`);
@@ -402,7 +391,7 @@ export default class GitCrdtPlugin extends Plugin {
     }
   }
 
-  // --- 私有辅助 ---
+  // ===== 私有辅助 =====
 
   private handleResult(result: SyncResult, action: string) {
     if (result.success) {
@@ -454,7 +443,7 @@ class GitCrdtSettingTab extends PluginSettingTab {
             this.plugin.settings.remoteUrl = value;
             await this.plugin.saveSettings();
             if (value) {
-              this.plugin.gitService.setRemote(value).catch(console.error);
+              this.plugin.shadowGit.setRemote(value).catch(console.error);
             }
           })
       );
@@ -523,15 +512,50 @@ class GitCrdtSettingTab extends PluginSettingTab {
           })
       );
 
+    // v0.6: Shadow Repo 设置
+    containerEl.createEl("h3", { text: "v0.6 Shadow Repo" });
+
+    new Setting(containerEl)
+      .setName("Use Shadow Repo")
+      .setDesc("Isolate Git operations in a shadow repo. Keeps user's staging area untouched. (Recommended: ON)")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.useShadowRepo)
+          .onChange(async (value) => {
+            this.plugin.settings.useShadowRepo = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    const shadowDir = this.plugin.shadowGit.getShadowDir();
+    new Setting(containerEl)
+      .setName("Shadow Repo Location")
+      .setDesc(`Shadow repo is at: ${shadowDir}`)
+      .addButton((btn) =>
+        btn.setButtonText("Show in Files").onClick(() => {
+          // 提示路径,用户可以手动导航
+          new Notice(`Shadow repo: ${shadowDir}`);
+        })
+      );
+
     // 操作按钮
     containerEl.createEl("h3", { text: "Actions" });
 
     new Setting(containerEl)
-      .setName("Initialize Git Repository")
-      .setDesc("Init a git repo in current vault if not already")
+      .setName("Initialize Shadow Repo")
+      .setDesc("Init the shadow git repo for sync operations")
       .addButton((btn) =>
         btn.setButtonText("Init").onClick(() => {
           this.plugin.doInit();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Sync Vault → Shadow")
+      .setDesc("Manually copy vault .md files to shadow repo working dir")
+      .addButton((btn) =>
+        btn.setButtonText("Sync").onClick(() => {
+          this.plugin.doSyncToShadow();
         })
       );
 
@@ -544,7 +568,6 @@ class GitCrdtSettingTab extends PluginSettingTab {
         })
       );
 
-    // v0.5: 历史记录上限设置
     new Setting(containerEl)
       .setName("Max History Records")
       .setDesc("Maximum number of merge history records to keep")
@@ -560,7 +583,7 @@ class GitCrdtSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Sync Now")
-      .setDesc("Pull → merge → commit → push")
+      .setDesc("Pull → merge → commit → push (via shadow repo)")
       .addButton((btn) =>
         btn
           .setButtonText("Sync")
@@ -579,32 +602,25 @@ class GitCrdtSettingTab extends PluginSettingTab {
         })
       );
 
-    // v0.3 新特性提示
-    containerEl.createEl("h3", { text: "v0.3 Features" });
-    const v3Info = containerEl.createEl("ul");
-    v3Info.createEl("li", {
-      text: "CRDT 编辑器实时绑定:打字即生成 Yjs 操作历史",
+    // 版本信息
+    containerEl.createEl("h3", { text: "About" });
+    const info = containerEl.createEl("ul");
+    info.createEl("li", {
+      text: "v0.6: Shadow repo isolation — Git operations happen in sidecar, not in vault.",
     });
-    v3Info.createEl("li", {
-      text: "Sidecar 持久化:关闭后重开保留 CRDT 身份",
+    info.createEl("li", {
+      text: "v0.5: Merge history + revert UI — every merge is recorded, one-click revert.",
     });
-    v3Info.createEl("li", {
-      text: "同步后自动刷新编辑器:无需手动重载",
+    info.createEl("li", {
+      text: "v0.4: Block-level structured merge — Markdown blocks as diff units.",
     });
-
-    // 提示
-    containerEl.createEl("h3", { text: "Notes" });
-    const ul = containerEl.createEl("ul");
-    ul.createEl("li", {
+    info.createEl("li", {
+      text: "v0.3: CRDT editor binding — typing generates Yjs operations.",
+    });
+    info.createEl("li", {
       text: "Only Markdown (.md) files get CRDT merging and editor binding.",
     });
-    ul.createEl("li", {
-      text: "Binary files go through normal Git (may conflict).",
-    });
-    ul.createEl("li", {
-      text: "Set Remote URL first, then click Init.",
-    });
-    ul.createEl("li", {
+    info.createEl("li", {
       text: "Click status bar for quick sync.",
     });
   }
