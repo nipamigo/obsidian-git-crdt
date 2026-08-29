@@ -1,0 +1,37 @@
+{
+  "name": "obsidian-git-crdt",
+  "version": "0.3.0",
+  "description": "Obsidian plugin: CRDT editor + Git sync — conflict-free collaboration via Yjs and isomorphic-git.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "typecheck": "tsc -noEmit -skipLibCheck"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "crdt",
+    "yjs",
+    "git",
+    "collaboration"
+  ],
+  "author": "you",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.21.0",
+    "jsdom": "^29.1.1",
+    "obsidian": "latest",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.9",
+    "diff-match-patch": "^1.0.5",
+    "isomorphic-git": "^1.27.0",
+    "y-protocols": "^1.0.6",
+    "yjs": "^13.6.18"
+  }
+}
