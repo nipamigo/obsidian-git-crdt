@@ -5,6 +5,8 @@ import { CrdtRegistry } from "./crdt";
 import { GitService } from "./git";
 import { SyncEngine, SyncResult } from "./sync";
 import { yEditorBindingExtension, bindYTextToView } from "./editor-binding";
+import { HistoryManager } from "./history";
+import { HistoryListModal } from "./history-ui";
 import { EditorView } from "@codemirror/view";
 
 interface GitCrdtSettings {
@@ -15,6 +17,7 @@ interface GitCrdtSettings {
   gitToken: string;
   autoSyncInterval: number;
   sidecarDir: string;
+  historyMaxRecords: number;
 }
 
 const DEFAULT_SETTINGS: GitCrdtSettings = {
@@ -25,6 +28,7 @@ const DEFAULT_SETTINGS: GitCrdtSettings = {
   gitToken: "",
   autoSyncInterval: 0,
   sidecarDir: ".obsidian/plugins/git-crdt/sidecar",
+  historyMaxRecords: 50,
 };
 
 export default class GitCrdtPlugin extends Plugin {
@@ -32,6 +36,7 @@ export default class GitCrdtPlugin extends Plugin {
   crdtRegistry!: CrdtRegistry;
   gitService!: GitService;
   syncEngine!: SyncEngine;
+  historyManager!: HistoryManager;
 
   private statusBarItem!: HTMLElement;
   private autoSyncTimer: any = null;
@@ -52,8 +57,18 @@ export default class GitCrdtPlugin extends Plugin {
       console.error("[git-crdt] failed to create sidecar dir:", e);
     }
 
+    // 确保 history 目录存在
+    const historyPath = path.join(this.vaultRoot, this.settings.sidecarDir, "history");
+    try {
+      fs.mkdirSync(historyPath, { recursive: true });
+    } catch (e) {
+      console.error("[git-crdt] failed to create history dir:", e);
+    }
+
     // 初始化各模块
     this.crdtRegistry = new CrdtRegistry(sidecarPath);
+
+    this.historyManager = new HistoryManager(historyPath, this.settings.historyMaxRecords);
 
     this.gitService = new GitService({
       fs,
@@ -65,7 +80,7 @@ export default class GitCrdtPlugin extends Plugin {
       token: this.settings.gitToken,
     });
 
-    this.syncEngine = new SyncEngine(this.app, this.crdtRegistry, this.gitService);
+    this.syncEngine = new SyncEngine(this.app, this.crdtRegistry, this.gitService, this.historyManager);
 
     // 状态栏
     this.statusBarItem = this.addStatusBarItem();
@@ -121,6 +136,26 @@ export default class GitCrdtPlugin extends Plugin {
       callback: () => this.doInit(),
     });
 
+    // ===== v0.5: 合并历史命令 =====
+    this.addCommand({
+      id: "git-crdt-history",
+      name: "Show merge history (all files)",
+      callback: () => this.showHistory(null),
+    });
+
+    this.addCommand({
+      id: "git-crdt-history-current",
+      name: "Show merge history (current file)",
+      editorCallback: (editor: Editor) => {
+        const file = this.app.workspace.getActiveFile();
+        if (file) {
+          this.showHistory(file.path);
+        } else {
+          new Notice("Git CRDT: no active file");
+        }
+      },
+    });
+
     // 设置面板
     this.addSettingTab(new GitCrdtSettingTab(this.app, this));
 
@@ -132,7 +167,7 @@ export default class GitCrdtPlugin extends Plugin {
     // 自动同步
     this.setupAutoSync();
 
-    console.log("[git-crdt] plugin loaded (v0.3 with editor binding)");
+    console.log("[git-crdt] plugin loaded (v0.5 with merge history + revert)");
   }
 
   onunload() {
@@ -316,6 +351,41 @@ export default class GitCrdtPlugin extends Plugin {
     this.gitService.setToken(token);
   }
 
+  // ===== v0.5: 合并历史 =====
+
+  /** 打开合并历史 UI */
+  showHistory(filterFile: string | null) {
+    new HistoryListModal(
+      this.app,
+      this.historyManager,
+      this.app.vault,
+      async (file: string, content: string) => {
+        await this.revertFile(file, content);
+      },
+      filterFile
+    ).open();
+  }
+
+  /** 回退文件到合并前状态 */
+  private async revertFile(filepath: string, beforeContent: string): Promise<void> {
+    const file = this.app.vault.getFileByPath(filepath);
+    if (!file || !(file instanceof TFile)) {
+      throw new Error(`File not found: ${filepath}`);
+    }
+
+    // 写回合并前内容
+    await this.app.vault.modify(file, beforeContent);
+
+    // 重新加载 CRDT
+    const mgr = this.crdtRegistry.get(filepath);
+    mgr.loadFromMarkdown(beforeContent);
+
+    // 刷新编辑器
+    this.refreshActiveEditor();
+
+    console.log(`[git-crdt] reverted ${filepath} to pre-merge state`);
+  }
+
   setupAutoSync() {
     if (this.autoSyncTimer) {
       clearInterval(this.autoSyncTimer);
@@ -340,7 +410,8 @@ export default class GitCrdtPlugin extends Plugin {
         `${action} done: pulled ${result.pulledFiles}, ` +
         `merged ${result.mergedFiles}, ` +
         `${result.committed ? "committed, " : ""}` +
-        `${result.pushed ? "pushed" : "not pushed"}`;
+        `${result.pushed ? "pushed" : "not pushed"}` +
+        `${result.recordedHistory > 0 ? `, ${result.recordedHistory} history records` : ""}`;
       this.setStatus(msg);
       new Notice(`Git CRDT: ${msg}`);
     } else {
@@ -462,6 +533,29 @@ class GitCrdtSettingTab extends PluginSettingTab {
         btn.setButtonText("Init").onClick(() => {
           this.plugin.doInit();
         })
+      );
+
+    new Setting(containerEl)
+      .setName("Merge History")
+      .setDesc(`View merge history and revert (${this.plugin.historyManager.count()} records)`)
+      .addButton((btn) =>
+        btn.setButtonText("Show History").onClick(() => {
+          this.plugin.showHistory(null);
+        })
+      );
+
+    // v0.5: 历史记录上限设置
+    new Setting(containerEl)
+      .setName("Max History Records")
+      .setDesc("Maximum number of merge history records to keep")
+      .addText((text) =>
+        text
+          .setValue(String(this.plugin.settings.historyMaxRecords))
+          .onChange(async (value) => {
+            const n = parseInt(value, 10);
+            this.plugin.settings.historyMaxRecords = isNaN(n) ? 50 : Math.max(5, n);
+            await this.plugin.saveSettings();
+          })
       );
 
     new Setting(containerEl)

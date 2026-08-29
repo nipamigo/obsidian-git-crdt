@@ -2,6 +2,7 @@ import { CrdtRegistry } from "./crdt";
 import { GitService } from "./git";
 import { mergeThreeWay, assertContentPreservation } from "./merge";
 import { mergeBlocksThreeWayV2 } from "./block-merge";
+import { HistoryManager } from "./history";
 import { App, TFile, Notice } from "obsidian";
 
 export interface SyncResult {
@@ -11,6 +12,7 @@ export interface SyncResult {
   committed: boolean;
   pushed: boolean;
   warnings: string[];
+  recordedHistory: number;
   error?: string;
 }
 
@@ -37,12 +39,14 @@ export class SyncEngine {
   private app: App;
   private crdtRegistry: CrdtRegistry;
   private git: GitService;
+  private history?: HistoryManager;
   private syncing = false;
 
-  constructor(app: App, crdtRegistry: CrdtRegistry, git: GitService) {
+  constructor(app: App, crdtRegistry: CrdtRegistry, git: GitService, history?: HistoryManager) {
     this.app = app;
     this.crdtRegistry = crdtRegistry;
     this.git = git;
+    this.history = history;
   }
 
   /** 执行一次完整的同步(pull → merge → commit → push) */
@@ -55,6 +59,7 @@ export class SyncEngine {
         committed: false,
         pushed: false,
         warnings: [],
+        recordedHistory: 0,
         error: "Sync already in progress",
       };
     }
@@ -67,9 +72,13 @@ export class SyncEngine {
       committed: false,
       pushed: false,
       warnings: [],
+      recordedHistory: 0,
     };
 
     try {
+      // 记录同步前的历史数量,用于统计本次新增
+      if (this.history) (this as any)._preSyncHistoryCount = this.history.count();
+
       // 第 1 步:fetch 远端,获取变更文件列表
       const pullResult = await this.git.smartPull();
       if (!pullResult.success) {
@@ -118,6 +127,13 @@ export class SyncEngine {
       }
 
       result.success = !result.error;
+
+      // 统计本次同步记录了多少条合并历史
+      if (this.history) {
+        result.recordedHistory = this.history.count() - (this as any)._preSyncHistoryCount || 0;
+        delete (this as any)._preSyncHistoryCount;
+      }
+
       return result;
     } catch (e: any) {
       result.error = e?.message || String(e);
@@ -192,6 +208,24 @@ export class SyncEngine {
     const finalContent = crdt.getMarkdown();
     if (finalContent !== localContent) {
       await vault.modify(file, finalContent);
+
+      // v0.5: 记录合并历史(只有内容实际变化时才记录)
+      if (this.history) {
+        try {
+          await this.history.record({
+            file: filepath,
+            before: localContent,
+            after: finalContent,
+            remoteContent,
+            source: `git pull from origin/${this.git.getBranch()}`,
+            warnings: warnings.filter((w) => w.includes(filepath)),
+          });
+          // 计数器(SyncResult 上)
+          (this as any)._lastRecordedCount = ((this as any)._lastRecordedCount || 0) + 1;
+        } catch (e: any) {
+          console.warn(`[git-crdt] failed to record history for ${filepath}:`, e);
+        }
+      }
     }
   }
 
@@ -205,11 +239,13 @@ export class SyncEngine {
         committed: false,
         pushed: false,
         warnings: [],
+        recordedHistory: 0,
         error: "Sync already in progress",
       };
     }
 
     this.syncing = true;
+    const preCount = this.history?.count() || 0;
     try {
       const pullResult = await this.git.smartPull();
       if (!pullResult.success) {
@@ -220,6 +256,7 @@ export class SyncEngine {
           committed: false,
           pushed: false,
           warnings: [],
+          recordedHistory: 0,
           error: pullResult.error,
         };
       }
@@ -236,6 +273,7 @@ export class SyncEngine {
         }
       }
 
+      const postCount = this.history?.count() || 0;
       return {
         success: true,
         pulledFiles: pullResult.changedFiles.length,
@@ -243,6 +281,7 @@ export class SyncEngine {
         committed: false,
         pushed: false,
         warnings,
+        recordedHistory: postCount - preCount,
       };
     } finally {
       this.syncing = false;

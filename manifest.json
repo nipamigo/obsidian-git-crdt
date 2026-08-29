@@ -1,7 +1,7 @@
 {
   "id": "git-crdt",
   "name": "Git CRDT",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "minAppVersion": "1.0.0",
   "description": "CRDT 编辑器 + Git 同步 — 无冲突的多人协作。pull 时用 Yjs 自动合并远程变更,不再出现 Git 冲突标记。",
   "author": "you",

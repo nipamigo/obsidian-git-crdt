@@ -40,6 +40,11 @@ export class GitService {
     this.token = token;
   }
 
+  /** 获取当前分支名 */
+  getBranch(): string {
+    return this.branch;
+  }
+
   /** 检查当前目录是不是 Git 仓库 */
   async isRepo(): Promise<boolean> {
     try {
