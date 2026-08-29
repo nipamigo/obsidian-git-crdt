@@ -575,7 +575,24 @@ class GitCrdtSettingTab extends PluginSettingTab {
       .setDesc(`${t("shadow.location.desc")} ${shadowDir}`)
       .addButton((btn) =>
         btn.setButtonText(t("shadow.showInFiles")).onClick(() => {
-          new Notice(`Shadow repo: ${shadowDir}`);
+          try {
+            // @ts-ignore — Obsidian 桌面端运行在 Electron 中
+            const electron = require("electron");
+            electron.shell.showItemInFolder(shadowDir);
+          } catch (e) {
+            // Electron 不可用(移动端等),回退到提示
+            new Notice(t("shadow.openFailed") + "\n" + shadowDir);
+          }
+        })
+      )
+      .addButton((btn) =>
+        btn.setButtonText(t("shadow.copyPath")).onClick(async () => {
+          try {
+            await navigator.clipboard.writeText(shadowDir);
+            new Notice(t("shadow.pathCopied"));
+          } catch (e) {
+            new Notice(shadowDir);
+          }
         })
       );
 

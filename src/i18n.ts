@@ -54,6 +54,9 @@ const STRINGS: Record<string, { zh: string; en: string }> = {
   "shadow.location": { zh: "Shadow Repo 位置", en: "Shadow Repo Location" },
   "shadow.location.desc": { zh: "Shadow repo 位于:", en: "Shadow repo is at:" },
   "shadow.showInFiles": { zh: "在文件管理器中显示", en: "Show in Files" },
+  "shadow.copyPath": { zh: "复制路径", en: "Copy Path" },
+  "shadow.openFailed": { zh: "无法打开文件管理器,请手动复制路径:", en: "Cannot open file manager. Copy this path manually:" },
+  "shadow.pathCopied": { zh: "路径已复制到剪贴板", en: "Path copied to clipboard" },
 
   // ===== 操作区 =====
   "actions.title": { zh: "操作", en: "Actions" },
