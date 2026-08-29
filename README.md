@@ -6,11 +6,13 @@
 
 ---
 
-## 最新版本:v0.3.0
+## 最新版本:v0.4.0
 
-**v0.3.0 重大更新**:编辑器实时 CRDT 绑定!打开 Markdown 文件时,Y.Text 自动绑定到 CodeMirror 6 编辑器,每一次按键都精确地转化为 Yjs 操作,保留完整的 CRDT 操作历史。同步后编辑器自动刷新,无需手动重载。
+**v0.4.0 重大更新**:块级结构化合并!把 Markdown 解析为块(标题/段落/列表/代码块/引用/表格),以块为单位做三路 diff(LCS 算法),块内冲突再降级到字符级文本合并。段落移动(剪切-粘贴)不再产生大面积冲突,同段落内的小改动仍保持字符级精度。
 
-**v0.2.0 重大更新**:深入研究了 OpenKnowledge 源码后,对齐了它的核心设计——**Git pull 用三路文本合并(而非 CRDT 合并)**,原因是 Git 场景下两边没有共享的 CRDT 操作历史,三路文本合并反而更可靠。CRDT 保留用于编辑器增量更新和实时协作。
+**v0.3.0**:编辑器实时 CRDT 绑定。打开 Markdown 文件时,Y.Text 自动绑定到 CodeMirror 6 编辑器,每一次按键都精确地转化为 Yjs 操作。
+
+**v0.2.0**:深入研究 OpenKnowledge 源码后,对齐了核心设计——Git pull 用三路文本合并(而非 CRDT 合并)。
 
 ---
 
@@ -37,7 +39,13 @@
 │  - 保留未变行的 Yjs Item 身份           │
 │  - Sidecar 持久化操作历史               │
 ├─────────────────────────────────────────┤
-│  Merge Layer (three-way text merge)     │  ← Git pull 合并发生在这里
+│  Merge Layer                              │  ← Git pull 合并发生在这里
+│  ╔═══════════════════════════════════╗   │
+│  ║ Block Merge (v0.4)               ║   │
+│  ║ - Markdown → 块(标题/段落/列表)  ║   │
+│  ║ - LCS 块级 diff                   ║   │
+│  ║ - 块内冲突 → 文本级 fallback      ║   │
+│  ╚═══════════════════════════════════╝   │
 │  - diff-match-patch 字符级补丁合并      │
 │  - assertContentPreservation 内容保全   │
 ├─────────────────────────────────────────┤
@@ -119,16 +127,19 @@ npm run build
 | 文件 | 行数 | 职责 | 参考 OK 的部分 |
 |:---|:---|:---|:---|
 | `src/main.ts` | 377 | 插件入口、设置面板、状态栏、命令 | - |
-| `src/merge.ts` | 240 | 三路文本合并 + 内容保全检测 | `bridge/merge-three-way.ts` |
+| `src/block-parser.ts` | 230 | Markdown 块解析器(标题/段落/列表/代码块/引用/表格) | mdast 映射思路 |
+| `src/block-merge.ts` | 280 | 块级三路合并(LCS + 相似度 + 块内 fallback) | 块级合并架构 |
+| `src/merge.ts` | 240 | 字符级三路文本合并 + 内容保全检测 | `bridge/merge-three-way.ts` |
 | `src/apply-diff.ts` | 124 | 行级快速 diff + 增量 Yjs 更新 | `bridge/apply-diff.ts` |
 | `src/crdt.ts` | 176 | Yjs CRDT 管理 + sidecar 持久化 | Y.Text-is-truth 设计 |
+| `src/editor-binding.ts` | 218 | CodeMirror 6 ↔ Y.Text 双向绑定 | - |
 | `src/git.ts` | 273 | isomorphic-git 封装 | sync-engine 思路 |
-| `src/sync.ts` | 254 | 同步编排引擎 | pull → merge → commit → push |
+| `src/sync.ts` | 260 | 同步编排引擎(块级合并 → CRDT 更新 → push) | pull → merge → commit → push |
 
 ### 合并算法
 
-1. **行级 diff3 框架**:按行比较 baseline / ours / theirs
-2. **冲突区域字符级补丁**:冲突行用 diff-match-patch 做字符级精细合并
+1. **块级 diff(v0.4)**:Markdown 解析为块,LCS 算法做块级三路 diff
+2. **块内字符级补丁**:块内冲突用 diff-match-patch 做字符级精细合并
 3. **内容保全三层检测**:
    - 子串检查:两边新增的内容必须都在结果中
    - 顺序检查:新增片段的相对顺序必须保持
@@ -162,7 +173,7 @@ push to remote
 - ✅ **v0.1**:MVP 核心功能(Git + CRDT 基础)
 - ✅ **v0.2**:三路文本合并 + 内容保全检测(对齐 OpenKnowledge)
 - ✅ **v0.3**:编辑器实时 CRDT 绑定(CodeMirror 6 + Yjs,打字即 Yjs 操作)
-- **v0.4**:块级结构化合并(Y.XmlFragment + mdast AST 映射)
+- ✅ **v0.4**:块级结构化合并(Markdown 块解析 + LCS 块级 diff + 块内文本级 fallback)
 - **v0.5**:Merge history + revert UI
 - **v0.6**:Shadow repo 隔离(不触碰用户 staging area)
 - **v1.0**:提交官方社区插件市场

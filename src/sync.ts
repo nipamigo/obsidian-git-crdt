@@ -1,6 +1,7 @@
 import { CrdtRegistry } from "./crdt";
 import { GitService } from "./git";
 import { mergeThreeWay, assertContentPreservation } from "./merge";
+import { mergeBlocksThreeWayV2 } from "./block-merge";
 import { App, TFile, Notice } from "obsidian";
 
 export interface SyncResult {
@@ -166,8 +167,8 @@ export class SyncEngine {
       // 本地还没有 HEAD(新文件)→ 远端版本为准
       merged = remoteContent;
     } else {
-      // 三路合并:baseline + ours(local) + theirs(remote)
-      merged = mergeThreeWay(baselineContent, localContent, remoteContent);
+      // v0.4:先用块级合并(段落/标题/列表为单位),块内冲突再降级到文本级合并
+      merged = mergeBlocksThreeWayV2(baselineContent, localContent, remoteContent);
 
       // 内容保全检测(只警告不中断)
       try {
