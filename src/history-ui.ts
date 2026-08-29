@@ -9,20 +9,23 @@
  * - 列表用 Obsidian 的 Modal API
  * - diff 预览用简单的 HTML 渲染(不依赖 CodeMirror diff)
  * - 回退操作有二次确认
+ * - v0.6: 所有界面文本支持中英双语
  */
 
 import { App, Modal, Setting, TFile, Notice, Vault } from "obsidian";
 import { HistoryManager } from "./history";
+import { t, getLang } from "./i18n";
 
 /** 格式化时间 */
 function formatTime(ts: number): string {
   const d = new Date(ts);
   const now = Date.now();
   const diff = now - ts;
-  if (diff < 60_000) return "刚刚";
-  if (diff < 3600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
-  if (diff < 86400_000) return `${Math.floor(diff / 3600_000)} 小时前`;
-  return d.toLocaleString("zh-CN", {
+  if (diff < 60_000) return t("history.justNow");
+  if (diff < 3600_000) return t("history.minutesAgo", { n: Math.floor(diff / 60_000) });
+  if (diff < 86400_000) return t("history.hoursAgo", { n: Math.floor(diff / 3600_000) });
+  const locale = getLang() === "zh" ? "zh-CN" : "en-US";
+  return d.toLocaleString(locale, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -88,7 +91,7 @@ function generateDiffHTML(before: string, after: string): string {
   });
 
   if (changes.length > 200) {
-    lines.push(`<div class="diff-more">... 还有 ${changes.length - 200} 行</div>`);
+    lines.push(`<div class="diff-more">${t("history.moreLines", { n: changes.length - 200 })}</div>`);
   }
 
   return lines.join("");
@@ -123,21 +126,21 @@ export class HistoryListModal extends Modal {
       ? this.history.getHistoryForFile(this.filterFile)
       : this.history.getAllHistory();
 
-    contentEl.createEl("h2", { text: "合并历史" });
+    contentEl.createEl("h2", { text: t("history.title") });
 
     if (this.filterFile) {
       contentEl.createEl("p", {
-        text: `文件: ${this.filterFile}`,
+        text: t("history.file", { file: this.filterFile }),
         cls: "setting-item-description",
       });
     }
 
     if (entries.length === 0) {
       contentEl.createEl("p", {
-        text: "暂无合并历史记录。执行 Sync 后会自动记录。",
+        text: t("history.empty"),
         cls: "setting-item-description",
       });
-      contentEl.createEl("button", { text: "关闭" }).onclick = () => this.close();
+      contentEl.createEl("button", { text: t("close") }).onclick = () => this.close();
       return;
     }
 
@@ -158,17 +161,17 @@ export class HistoryListModal extends Modal {
       });
       if (entry.warningCount > 0) {
         leftEl.createEl("span", {
-          text: `⚠ ${entry.warningCount} 警告`,
+          text: t("history.warningBadge", { n: entry.warningCount }),
           cls: "history-warning",
         });
       }
       leftEl.createEl("span", {
-        text: `${entry.beforeLength} → ${entry.afterLength} 字符`,
+        text: t("history.chars", { before: entry.beforeLength, after: entry.afterLength }),
         cls: "history-size",
       });
 
       const rightEl = itemEl.createDiv({ cls: "history-item-actions" });
-      const detailBtn = rightEl.createEl("button", { text: "查看差异", cls: "mod-compact" });
+      const detailBtn = rightEl.createEl("button", { text: t("history.viewDiff"), cls: "mod-compact" });
       detailBtn.onclick = () => {
         this.close();
         new HistoryDetailModal(
@@ -184,17 +187,17 @@ export class HistoryListModal extends Modal {
 
     // 底部操作
     const footerEl = contentEl.createDiv({ cls: "history-footer" });
-    footerEl.createEl("button", { text: "关闭" }).onclick = () => this.close();
+    footerEl.createEl("button", { text: t("close") }).onclick = () => this.close();
 
     const clearBtn = footerEl.createEl("button", {
-      text: "清空历史",
+      text: t("history.clearAll"),
       cls: "mod-compact",
     });
     clearBtn.style.float = "right";
     clearBtn.onclick = () => {
-      if (confirm("确定要清空所有合并历史吗?此操作不可撤销。")) {
+      if (confirm(t("history.confirmClear"))) {
         this.history.clearAll();
-        new Notice("合并历史已清空");
+        new Notice(t("history.cleared"));
         this.close();
       }
     };
@@ -235,37 +238,38 @@ class HistoryDetailModal extends Modal {
 
     const record = this.history.getRecord(this.recordId);
     if (!record) {
-      contentEl.createEl("p", { text: "记录不存在或已删除" });
-      contentEl.createEl("button", { text: "关闭" }).onclick = () => this.close();
+      contentEl.createEl("p", { text: t("history.notFound") });
+      contentEl.createEl("button", { text: t("close") }).onclick = () => this.close();
       return;
     }
 
-    contentEl.createEl("h2", { text: "合并详情" });
+    contentEl.createEl("h2", { text: t("history.detail") });
 
     // 元信息
     const metaEl = contentEl.createDiv({ cls: "history-detail-meta" });
     metaEl.createEl("p", {
-      text: `文件: ${record.file}`,
+      text: t("history.file", { file: record.file }),
+      cls: "setting-item-description",
+    });
+    const locale = getLang() === "zh" ? "zh-CN" : "en-US";
+    metaEl.createEl("p", {
+      text: t("history.time", { time: new Date(record.timestamp).toLocaleString(locale) }),
       cls: "setting-item-description",
     });
     metaEl.createEl("p", {
-      text: `时间: ${new Date(record.timestamp).toLocaleString("zh-CN")}`,
-      cls: "setting-item-description",
-    });
-    metaEl.createEl("p", {
-      text: `来源: ${record.source}`,
+      text: t("history.source", { source: record.source }),
       cls: "setting-item-description",
     });
     if (record.warnings.length > 0) {
       const warnEl = metaEl.createEl("div", { cls: "history-warnings" });
-      warnEl.createEl("p", { text: "警告:", cls: "setting-item-description" });
+      warnEl.createEl("p", { text: t("history.warnings"), cls: "setting-item-description" });
       for (const w of record.warnings) {
         warnEl.createEl("p", { text: `  ⚠ ${w}`, cls: "history-warning-text" });
       }
     }
 
     // diff 预览
-    contentEl.createEl("h3", { text: "差异预览(合并前 → 合并后)" });
+    contentEl.createEl("h3", { text: t("history.diffPreview") });
 
     const diffContainer = contentEl.createDiv({ cls: "history-diff-container" });
     const diffHTML = generateDiffHTML(record.before, record.after);
@@ -305,24 +309,29 @@ class HistoryDetailModal extends Modal {
     // 操作按钮
     const actionsEl = contentEl.createDiv({ cls: "history-actions" });
     const revertBtn = actionsEl.createEl("button", {
-      text: "回退到合并前",
+      text: t("history.revert"),
       cls: "mod-warning",
     });
     revertBtn.onclick = async () => {
-      if (!confirm(`确定回退 "${record.file}" 到合并前状态?\n\n合并前: ${record.before.length} 字符\n当前: ${record.after.length} 字符`)) {
+      const confirmMsg = t("history.confirmRevert", {
+        file: record.file,
+        before: record.before.length,
+        after: record.after.length,
+      });
+      if (!confirm(confirmMsg)) {
         return;
       }
       try {
         await this.onRevert(record.file, record.before);
-        new Notice(`已回退 ${record.file} 到合并前状态`);
+        new Notice(t("history.reverted", { file: record.file }));
         this.close();
       } catch (e: any) {
-        new Notice(`回退失败: ${e.message}`);
+        new Notice(t("history.revertFailed", { error: e.message }));
         console.error("[git-crdt] revert failed:", e);
       }
     };
 
-    const closeBtn = actionsEl.createEl("button", { text: "关闭" });
+    const closeBtn = actionsEl.createEl("button", { text: t("close") });
     closeBtn.onclick = () => this.close();
   }
 

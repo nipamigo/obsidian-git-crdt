@@ -9,6 +9,7 @@ import { yEditorBindingExtension, bindYTextToView } from "./editor-binding";
 import { HistoryManager } from "./history";
 import { HistoryListModal } from "./history-ui";
 import { EditorView } from "@codemirror/view";
+import { setLang, getLang, t } from "./i18n";
 
 interface GitCrdtSettings {
   remoteUrl: string;
@@ -20,6 +21,7 @@ interface GitCrdtSettings {
   sidecarDir: string;
   historyMaxRecords: number;
   useShadowRepo: boolean;
+  language: "zh" | "en";
 }
 
 const DEFAULT_SETTINGS: GitCrdtSettings = {
@@ -32,6 +34,7 @@ const DEFAULT_SETTINGS: GitCrdtSettings = {
   sidecarDir: ".obsidian/plugins/git-crdt/sidecar",
   historyMaxRecords: 50,
   useShadowRepo: true,
+  language: "zh",
 };
 
 export default class GitCrdtPlugin extends Plugin {
@@ -47,6 +50,9 @@ export default class GitCrdtPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+
+    // 设置语言
+    setLang(this.settings.language);
 
     // 获取 vault 根目录
     // @ts-ignore — Obsidian FileSystemAdapter 有 basePath
@@ -89,9 +95,9 @@ export default class GitCrdtPlugin extends Plugin {
 
     // 状态栏
     this.statusBarItem = this.addStatusBarItem();
-    this.statusBarItem.setText("Git CRDT: ready");
+    this.statusBarItem.setText(`Git CRDT: ${t("ready")}`);
     this.statusBarItem.style.cursor = "pointer";
-    this.statusBarItem.title = "Click to sync";
+    this.statusBarItem.title = t("cmd.sync");
     this.statusBarItem.onClickEvent(() => this.doSync());
 
     // ===== v0.3: 编辑器 CRDT 实时绑定 =====
@@ -115,50 +121,50 @@ export default class GitCrdtPlugin extends Plugin {
     // ===== 命令 =====
     this.addCommand({
       id: "git-crdt-sync",
-      name: "Sync (pull → merge → commit → push)",
+      name: t("cmd.sync"),
       callback: () => this.doSync(),
     });
 
     this.addCommand({
       id: "git-crdt-pull",
-      name: "Pull only (fetch + three-way merge)",
+      name: t("cmd.pull"),
       callback: () => this.doPull(),
     });
 
     this.addCommand({
       id: "git-crdt-push",
-      name: "Commit & push",
+      name: t("cmd.push"),
       callback: () => this.doPush(),
     });
 
     this.addCommand({
       id: "git-crdt-init",
-      name: "Initialize Git repo (shadow repo)",
+      name: t("cmd.init"),
       callback: () => this.doInit(),
     });
 
     this.addCommand({
       id: "git-crdt-sync-to-shadow",
-      name: "Sync vault files to shadow repo",
+      name: t("cmd.syncToShadow"),
       callback: () => this.doSyncToShadow(),
     });
 
     // ===== v0.5: 合并历史命令 =====
     this.addCommand({
       id: "git-crdt-history",
-      name: "Show merge history (all files)",
+      name: t("cmd.historyAll"),
       callback: () => this.showHistory(null),
     });
 
     this.addCommand({
       id: "git-crdt-history-current",
-      name: "Show merge history (current file)",
+      name: t("cmd.historyCurrent"),
       editorCallback: (editor: Editor) => {
         const file = this.app.workspace.getActiveFile();
         if (file) {
           this.showHistory(file.path);
         } else {
-          new Notice("Git CRDT: no active file");
+          new Notice(t("notice.noActiveFile"));
         }
       },
     });
@@ -174,7 +180,7 @@ export default class GitCrdtPlugin extends Plugin {
     // 自动同步
     this.setupAutoSync();
 
-    console.log("[git-crdt] plugin loaded (v0.6 with shadow repo isolation)");
+    console.log(`[git-crdt] ${t("log.loaded")}`);
   }
 
   onunload() {
@@ -184,7 +190,7 @@ export default class GitCrdtPlugin extends Plugin {
     }
     this.saveAllSidecars().catch(console.error);
     this.crdtRegistry.destroyAll();
-    console.log("[git-crdt] plugin unloaded");
+    console.log(`[git-crdt] ${t("log.unloaded")}`);
   }
 
   async loadSettings() {
@@ -264,11 +270,11 @@ export default class GitCrdtPlugin extends Plugin {
 
   async doSync() {
     if (this.syncEngine.isSyncing()) {
-      new Notice("Git CRDT: sync already in progress...");
+      new Notice(t("notice.syncInProgress"));
       return;
     }
 
-    this.setStatus("syncing...");
+    this.setStatus(t("syncing"));
     const result = await this.syncEngine.sync();
     this.handleResult(result, "Sync");
     this.refreshActiveEditor();
@@ -276,11 +282,11 @@ export default class GitCrdtPlugin extends Plugin {
 
   async doPull() {
     if (this.syncEngine.isSyncing()) {
-      new Notice("Git CRDT: sync already in progress...");
+      new Notice(t("notice.syncInProgress"));
       return;
     }
 
-    this.setStatus("pulling...");
+    this.setStatus(t("pulling"));
     const result = await this.syncEngine.pullOnly();
     this.handleResult(result, "Pull");
     this.refreshActiveEditor();
@@ -288,14 +294,14 @@ export default class GitCrdtPlugin extends Plugin {
 
   /** v0.6: 手动同步 vault → shadow */
   async doSyncToShadow() {
-    this.setStatus("syncing to shadow...");
+    this.setStatus(t("syncingToShadow"));
     try {
       const result = await this.shadowGit.syncVaultToShadow();
-      this.setStatus("ready");
-      new Notice(`Git CRDT: ${result.copied} files synced, ${result.deleted} deleted (shadow repo)`);
+      this.setStatus(t("ready"));
+      new Notice(t("notice.syncToShadow", { copied: result.copied, deleted: result.deleted }));
     } catch (e: any) {
-      this.setStatus("error");
-      new Notice(`Git CRDT: sync to shadow failed — ${e?.message || e}`);
+      this.setStatus(t("error"));
+      new Notice(t("notice.syncToShadowFailed") + (e?.message || e));
     }
   }
 
@@ -307,21 +313,21 @@ export default class GitCrdtPlugin extends Plugin {
   }
 
   async doPush() {
-    this.setStatus("committing...");
+    this.setStatus(t("committing"));
     const result = await this.syncEngine.commitAndPush("git-crdt: manual commit");
     if (!result.committed) {
-      this.setStatus("nothing to commit");
-      new Notice("Git CRDT: nothing to commit");
+      this.setStatus(t("nothingToCommit"));
+      new Notice(`Git CRDT: ${t("nothingToCommit")}`);
       return;
     }
 
-    this.setStatus("pushing...");
+    this.setStatus(t("pushing"));
     if (result.pushed) {
-      this.setStatus("pushed");
-      new Notice("Git CRDT: pushed successfully");
+      this.setStatus(t("pushed"));
+      new Notice(t("notice.pushedOk"));
     } else {
-      this.setStatus("push failed");
-      new Notice(`Git CRDT: push failed — ${result.error}`);
+      this.setStatus(t("pushFailed"));
+      new Notice(t("notice.pushFailed") + (result.error || ""));
     }
   }
 
@@ -331,10 +337,10 @@ export default class GitCrdtPlugin extends Plugin {
       if (this.settings.remoteUrl) {
         await this.shadowGit.setRemote(this.settings.remoteUrl);
       }
-      new Notice("Git CRDT: shadow repo initialized");
-      this.setStatus("ready");
+      new Notice(t("notice.shadowInit"));
+      this.setStatus(t("ready"));
     } catch (e: any) {
-      new Notice(`Git CRDT: init failed — ${e?.message || e}`);
+      new Notice(t("notice.initFailed") + (e?.message || e));
     }
   }
 
@@ -395,23 +401,38 @@ export default class GitCrdtPlugin extends Plugin {
 
   private handleResult(result: SyncResult, action: string) {
     if (result.success) {
-      const msg =
-        `${action} done: pulled ${result.pulledFiles}, ` +
-        `merged ${result.mergedFiles}, ` +
-        `${result.committed ? "committed, " : ""}` +
-        `${result.pushed ? "pushed" : "not pushed"}` +
-        `${result.recordedHistory > 0 ? `, ${result.recordedHistory} history records` : ""}`;
+      const committed = result.committed ? t("result.committed") : "";
+      const pushed = result.committed
+        ? (result.pushed ? t("pushed") : t("result.notPushed"))
+        : t("result.notPushed");
+      const history = result.recordedHistory > 0
+        ? t("result.historySuffix", { n: result.recordedHistory })
+        : "";
+
+      const msg = t("result.actionDone", {
+        action,
+        pulled: result.pulledFiles,
+        merged: result.mergedFiles,
+        committed,
+        pushed,
+        history,
+      });
       this.setStatus(msg);
       new Notice(`Git CRDT: ${msg}`);
     } else {
-      this.setStatus("error");
-      new Notice(`Git CRDT: ${action} failed — ${result.error}`);
+      this.setStatus(t("error"));
+      new Notice(t("notice.actionFailed", { action, error: result.error || "" }));
       console.error("[git-crdt] sync error:", result.error);
     }
   }
 
   private setStatus(text: string) {
     this.statusBarItem.setText(`Git CRDT: ${text}`);
+  }
+
+  /** 公开方法:刷新状态栏文本(供 SettingTab 语言切换后调用) */
+  refreshStatusBar(): void {
+    this.statusBarItem.setText(`Git CRDT: ${t("ready")}`);
   }
 }
 
@@ -427,14 +448,35 @@ class GitCrdtSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "Git CRDT Settings" });
+    containerEl.createEl("h2", { text: t("settingsTitle") });
     containerEl.createEl("p", {
-      text: "CRDT editor + Git sync — conflict-free collaboration.",
+      text: t("settingsDesc"),
     });
 
+    // ===== 语言设置(放在最前面) =====
     new Setting(containerEl)
-      .setName("Git Remote URL")
-      .setDesc("Remote repository URL (GitHub / GitLab / etc.)")
+      .setName(t("setting.language"))
+      .setDesc(t("setting.language.desc"))
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("zh", "中文")
+          .addOption("en", "English")
+          .setValue(this.plugin.settings.language)
+          .onChange(async (value) => {
+            const lang = value as "zh" | "en";
+            this.plugin.settings.language = lang;
+            setLang(lang);
+            await this.plugin.saveSettings();
+            // 刷新设置面板
+            this.display();
+            // 刷新状态栏
+            this.plugin.refreshStatusBar();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName(t("setting.remoteUrl"))
+      .setDesc(t("setting.remoteUrl.desc"))
       .addText((text) =>
         text
           .setPlaceholder("https://github.com/user/repo.git")
@@ -449,8 +491,8 @@ class GitCrdtSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Branch")
-      .setDesc("Branch to sync")
+      .setName(t("setting.branch"))
+      .setDesc(t("setting.branch.desc"))
       .addText((text) =>
         text
           .setPlaceholder("main")
@@ -462,8 +504,8 @@ class GitCrdtSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Author Name")
-      .setDesc("Git commit author name")
+      .setName(t("setting.authorName"))
+      .setDesc(t("setting.authorName.desc"))
       .addText((text) =>
         text
           .setValue(this.plugin.settings.authorName)
@@ -474,8 +516,8 @@ class GitCrdtSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Author Email")
-      .setDesc("Git commit author email")
+      .setName(t("setting.authorEmail"))
+      .setDesc(t("setting.authorEmail.desc"))
       .addText((text) =>
         text
           .setValue(this.plugin.settings.authorEmail)
@@ -486,8 +528,8 @@ class GitCrdtSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Git Token")
-      .setDesc("Personal access token for push. Can also set via GIT_TOKEN env var.")
+      .setName(t("setting.gitToken"))
+      .setDesc(t("setting.gitToken.desc"))
       .addText((text) =>
         text
           .setValue(this.plugin.settings.gitToken)
@@ -499,8 +541,8 @@ class GitCrdtSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Auto Sync Interval (minutes)")
-      .setDesc("0 to disable. Recommended: 5 minutes or more.")
+      .setName(t("setting.autoSync"))
+      .setDesc(t("setting.autoSync.desc"))
       .addText((text) =>
         text
           .setValue(String(this.plugin.settings.autoSyncInterval))
@@ -513,11 +555,11 @@ class GitCrdtSettingTab extends PluginSettingTab {
       );
 
     // v0.6: Shadow Repo 设置
-    containerEl.createEl("h3", { text: "v0.6 Shadow Repo" });
+    containerEl.createEl("h3", { text: t("shadow.title") });
 
     new Setting(containerEl)
-      .setName("Use Shadow Repo")
-      .setDesc("Isolate Git operations in a shadow repo. Keeps user's staging area untouched. (Recommended: ON)")
+      .setName(t("shadow.useShadow"))
+      .setDesc(t("shadow.useShadow.desc"))
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.useShadowRepo)
@@ -529,48 +571,48 @@ class GitCrdtSettingTab extends PluginSettingTab {
 
     const shadowDir = this.plugin.shadowGit.getShadowDir();
     new Setting(containerEl)
-      .setName("Shadow Repo Location")
-      .setDesc(`Shadow repo is at: ${shadowDir}`)
+      .setName(t("shadow.location"))
+      .setDesc(`${t("shadow.location.desc")} ${shadowDir}`)
       .addButton((btn) =>
-        btn.setButtonText("Show in Files").onClick(() => {
-          // 提示路径,用户可以手动导航
+        btn.setButtonText(t("shadow.showInFiles")).onClick(() => {
           new Notice(`Shadow repo: ${shadowDir}`);
         })
       );
 
     // 操作按钮
-    containerEl.createEl("h3", { text: "Actions" });
+    containerEl.createEl("h3", { text: t("actions.title") });
 
     new Setting(containerEl)
-      .setName("Initialize Shadow Repo")
-      .setDesc("Init the shadow git repo for sync operations")
+      .setName(t("actions.initShadow"))
+      .setDesc(t("actions.initShadow.desc"))
       .addButton((btn) =>
-        btn.setButtonText("Init").onClick(() => {
+        btn.setButtonText(t("actions.initBtn")).onClick(() => {
           this.plugin.doInit();
         })
       );
 
     new Setting(containerEl)
-      .setName("Sync Vault → Shadow")
-      .setDesc("Manually copy vault .md files to shadow repo working dir")
+      .setName(t("actions.syncToShadow"))
+      .setDesc(t("actions.syncToShadow.desc"))
       .addButton((btn) =>
-        btn.setButtonText("Sync").onClick(() => {
+        btn.setButtonText(t("actions.syncBtn")).onClick(() => {
           this.plugin.doSyncToShadow();
         })
       );
 
+    const historyCount = this.plugin.historyManager.count();
     new Setting(containerEl)
-      .setName("Merge History")
-      .setDesc(`View merge history and revert (${this.plugin.historyManager.count()} records)`)
+      .setName(t("actions.mergeHistory"))
+      .setDesc(`${t("actions.mergeHistory.desc")} (${historyCount})`)
       .addButton((btn) =>
-        btn.setButtonText("Show History").onClick(() => {
+        btn.setButtonText(t("actions.showHistoryBtn")).onClick(() => {
           this.plugin.showHistory(null);
         })
       );
 
     new Setting(containerEl)
-      .setName("Max History Records")
-      .setDesc("Maximum number of merge history records to keep")
+      .setName(t("actions.maxRecords"))
+      .setDesc(t("actions.maxRecords.desc"))
       .addText((text) =>
         text
           .setValue(String(this.plugin.settings.historyMaxRecords))
@@ -582,11 +624,11 @@ class GitCrdtSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Sync Now")
-      .setDesc("Pull → merge → commit → push (via shadow repo)")
+      .setName(t("actions.syncNow"))
+      .setDesc(t("actions.syncNow.desc"))
       .addButton((btn) =>
         btn
-          .setButtonText("Sync")
+          .setButtonText(t("actions.syncBtn"))
           .setCta()
           .onClick(() => {
             this.plugin.doSync();
@@ -594,34 +636,22 @@ class GitCrdtSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Pull Only")
-      .setDesc("Fetch and merge only, no commit or push")
+      .setName(t("actions.pullOnly"))
+      .setDesc(t("actions.pullOnly.desc"))
       .addButton((btn) =>
-        btn.setButtonText("Pull").onClick(() => {
+        btn.setButtonText(t("actions.pullBtn")).onClick(() => {
           this.plugin.doPull();
         })
       );
 
     // 版本信息
-    containerEl.createEl("h3", { text: "About" });
+    containerEl.createEl("h3", { text: t("about.title") });
     const info = containerEl.createEl("ul");
-    info.createEl("li", {
-      text: "v0.6: Shadow repo isolation — Git operations happen in sidecar, not in vault.",
-    });
-    info.createEl("li", {
-      text: "v0.5: Merge history + revert UI — every merge is recorded, one-click revert.",
-    });
-    info.createEl("li", {
-      text: "v0.4: Block-level structured merge — Markdown blocks as diff units.",
-    });
-    info.createEl("li", {
-      text: "v0.3: CRDT editor binding — typing generates Yjs operations.",
-    });
-    info.createEl("li", {
-      text: "Only Markdown (.md) files get CRDT merging and editor binding.",
-    });
-    info.createEl("li", {
-      text: "Click status bar for quick sync.",
-    });
+    info.createEl("li", { text: t("about.v06") });
+    info.createEl("li", { text: t("about.v05") });
+    info.createEl("li", { text: t("about.v04") });
+    info.createEl("li", { text: t("about.v03") });
+    info.createEl("li", { text: t("about.mdOnly") });
+    info.createEl("li", { text: t("about.clickStatus") });
   }
 }
